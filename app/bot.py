@@ -10,7 +10,7 @@ from uuid import uuid4
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.filters import Command
-from aiogram.types import Document, Message
+from aiogram.types import CallbackQuery, Document, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.config import DATA_DIR, TMP_DIR, load_settings
 from app.db import get_history, init_db, save_check
@@ -37,6 +37,20 @@ SETTINGS = None
 _EMOJI_PATTERN = re.compile(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]")
 
 
+def _main_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🛠️ Помощь", callback_data="menu:help"),
+                InlineKeyboardButton(text="ℹ️ О боте", callback_data="menu:about"),
+            ],
+            [
+                InlineKeyboardButton(text="🗂️ История", callback_data="menu:history"),
+            ],
+        ]
+    )
+
+
 def _theme_text(text: str, settings) -> str:
     theme = getattr(settings, "message_theme", "emotional")
     if theme != "minimal":
@@ -50,9 +64,9 @@ def _theme_text(text: str, settings) -> str:
     return themed.strip()
 
 
-async def _answer(message: Message, text: str) -> None:
+async def _answer(message: Message, text: str, reply_markup: InlineKeyboardMarkup | None = None) -> None:
     themed = _theme_text(text, SETTINGS)
-    await message.answer(themed, parse_mode="HTML")
+    await message.answer(themed, parse_mode="HTML", reply_markup=reply_markup)
 
 
 def _now_string() -> str:
@@ -172,6 +186,71 @@ def _format_result(file_name: str, probability: float, signs: list[str] | None =
     )
 
 
+def _start_text() -> str:
+    return (
+        "<b>👋 AI Detector готов к работе</b>\n\n"
+        "Отправьте изображение или видео, и я покажу:\n"
+        "• 📊 вероятность AI-генерации\n"
+        "• 🧠 итоговый статус\n"
+        "• 🔎 краткое объяснение\n"
+        "• 🧩 найденные визуальные признаки\n\n"
+        "<b>Команды</b>\n"
+        "/help — помощь\n"
+        "/about — о модели\n"
+        "/history — история проверок"
+    )
+
+
+def _help_text(settings) -> str:
+    limit_mb = min(int(settings.max_file_size_mb), int(settings.telegram_download_limit_mb))
+    return (
+        "<b>🛠️ Как пользоваться</b>\n\n"
+        "1. Отправьте фото или видео.\n"
+        "2. Для фото лучше использовать отправку <b>как файл</b>, без сжатия.\n"
+        "3. Получите процент, итог, пояснение и признаки.\n\n"
+        "<b>Команды</b>\n"
+        "/start — приветствие\n"
+        "/help — подсказка\n"
+        "/about — о модели\n"
+        "/history — последние проверки\n\n"
+        "<b>Форматы</b>\n"
+        "JPG, JPEG, PNG, MP4, MOV, AVI\n\n"
+        f"📏 Лимит размера: <b>{limit_mb} МБ</b>"
+    )
+
+
+def _about_text() -> str:
+    return (
+        "<b>ℹ️ О боте</b>\n\n"
+        "Я оцениваю вероятность AI-генерации и отдельно показываю визуальные признаки:\n"
+        "• контраст\n"
+        "• резкость и границы\n"
+        "• насыщенность\n"
+        "• цветовой баланс\n"
+        "• плотность данных\n\n"
+        "⚠️ <i>Результат является вероятностной оценкой и не считается 100% доказательством.</i>"
+    )
+
+
+def _history_text(settings, user_id: int) -> str:
+    records = get_history(settings.db_path, user_id=user_id, limit=settings.history_limit)
+    if not records:
+        return "<b>🗂️ История пока пустая</b>\n\nОтправьте первый файл для проверки."
+
+    lines = [f"<b>🗂️ История проверок</b>\nПоследние {settings.history_limit}:"]
+    for idx, record in enumerate(records, start=1):
+        percent = record.probability * 100
+        lines.append(
+            f"\n<b>{idx}. {escape(record.file_type.upper())}</b>\n"
+            f"🕒 {escape(record.created_at)}\n"
+            f"📁 <code>{escape(record.file_name)}</code>\n"
+            f"📊 AI: <b>{percent:.2f}%</b>\n"
+            f"🧠 {escape(record.label)}"
+        )
+
+    return "\n".join(lines)
+
+
 async def _analyze_and_reply_image(
     *,
     message: Message,
@@ -262,84 +341,62 @@ async def _analyze_and_reply_video(
 
 @router.message(Command("start"))
 async def cmd_start(message: Message, bot: Bot) -> None:
-    text = (
-        "<b>👋 AI Detector готов к работе</b>\n\n"
-        "Отправьте изображение или видео, и я покажу:\n"
-        "• 📊 вероятность AI-генерации\n"
-        "• 🧠 итоговый статус\n"
-        "• 🔎 краткое объяснение\n"
-        "• 🧩 найденные визуальные признаки\n\n"
-        "<b>Команды</b>\n"
-        "/help — помощь\n"
-        "/about — о модели\n"
-        "/history — история проверок"
-    )
-    await _answer(message, text)
+    text = _start_text()
+    await _answer(message, text, reply_markup=_main_menu_keyboard())
     await _notify_admin(message=message, bot=bot, settings=SETTINGS, response_text=text, tag="Команда /start")
 
 
 @router.message(Command("help"))
 async def cmd_help(message: Message, bot: Bot) -> None:
     settings = SETTINGS
-    limit_mb = min(int(settings.max_file_size_mb), int(settings.telegram_download_limit_mb))
-    text = (
-        "<b>🛠️ Как пользоваться</b>\n\n"
-        "1. Отправьте фото или видео.\n"
-        "2. Для фото лучше использовать отправку <b>как файл</b>, без сжатия.\n"
-        "3. Получите процент, итог, пояснение и признаки.\n\n"
-        "<b>Команды</b>\n"
-        "/start — приветствие\n"
-        "/help — подсказка\n"
-        "/about — о модели\n"
-        "/history — последние проверки\n\n"
-        "<b>Форматы</b>\n"
-        "JPG, JPEG, PNG, MP4, MOV, AVI\n\n"
-        f"📏 Лимит размера: <b>{limit_mb} МБ</b>"
-    )
-    await _answer(message, text)
+    text = _help_text(settings)
+    await _answer(message, text, reply_markup=_main_menu_keyboard())
     await _notify_admin(message=message, bot=bot, settings=SETTINGS, response_text=text, tag="Команда /help")
 
 
 @router.message(Command("about"))
 async def cmd_about(message: Message, bot: Bot) -> None:
-    text = (
-        "<b>ℹ️ О боте</b>\n\n"
-        "Я оцениваю вероятность AI-генерации и отдельно показываю визуальные признаки:\n"
-        "• контраст\n"
-        "• резкость и границы\n"
-        "• насыщенность\n"
-        "• цветовой баланс\n"
-        "• плотность данных\n\n"
-        "⚠️ <i>Результат является вероятностной оценкой и не считается 100% доказательством.</i>"
-    )
-    await _answer(message, text)
+    text = _about_text()
+    await _answer(message, text, reply_markup=_main_menu_keyboard())
     await _notify_admin(message=message, bot=bot, settings=SETTINGS, response_text=text, tag="Команда /about")
 
 
 @router.message(Command("history"))
 async def cmd_history(message: Message, bot: Bot) -> None:
     settings = SETTINGS
-    records = get_history(settings.db_path, user_id=message.from_user.id, limit=settings.history_limit)
-    if not records:
-        text = "<b>🗂️ История пока пустая</b>\n\nОтправьте первый файл для проверки."
-        await _answer(message, text)
-        await _notify_admin(message=message, bot=bot, settings=settings, response_text=text, tag="Команда /history")
-        return
-
-    lines = [f"<b>🗂️ История проверок</b>\nПоследние {settings.history_limit}:"]
-    for idx, record in enumerate(records, start=1):
-        percent = record.probability * 100
-        lines.append(
-            f"\n<b>{idx}. {escape(record.file_type.upper())}</b>\n"
-            f"🕒 {escape(record.created_at)}\n"
-            f"📁 <code>{escape(record.file_name)}</code>\n"
-            f"📊 AI: <b>{percent:.2f}%</b>\n"
-            f"🧠 {escape(record.label)}"
-        )
-
-    text = "\n".join(lines)
-    await _answer(message, text)
+    text = _history_text(settings, message.from_user.id)
+    await _answer(message, text, reply_markup=_main_menu_keyboard())
     await _notify_admin(message=message, bot=bot, settings=settings, response_text=text, tag="Команда /history")
+
+
+@router.callback_query(F.data == "menu:help")
+async def callback_help(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await callback.message.answer(
+        _theme_text(_help_text(SETTINGS), SETTINGS),
+        parse_mode="HTML",
+        reply_markup=_main_menu_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "menu:about")
+async def callback_about(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await callback.message.answer(
+        _theme_text(_about_text(), SETTINGS),
+        parse_mode="HTML",
+        reply_markup=_main_menu_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "menu:history")
+async def callback_history(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await callback.message.answer(
+        _theme_text(_history_text(SETTINGS, callback.from_user.id), SETTINGS),
+        parse_mode="HTML",
+        reply_markup=_main_menu_keyboard(),
+    )
 
 
 @router.message(F.photo)
@@ -458,7 +515,7 @@ async def handle_unknown(message: Message, bot: Bot) -> None:
         "<b>🤖 Я работаю с изображениями и видео</b>\n\n"
         "Отправьте файл для анализа или используйте /help."
     )
-    await _answer(message, text)
+    await _answer(message, text, reply_markup=_main_menu_keyboard())
     await _notify_admin(message=message, bot=bot, settings=SETTINGS, response_text=text, tag="Неизвестное сообщение")
 
 
